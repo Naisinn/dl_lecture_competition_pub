@@ -13,52 +13,58 @@ import gc
 from src.models import BasicConvClassifier
 from src.utils import set_seed
 
+# データセットクラス
 class ThingsMEGDataset(torch.utils.data.Dataset):
-    def __init__(self, split: str, data_dir: str = "data") -> None:
+    def __init__(self, split: str, data_dir: str = "data", chunk_size: int = 1000) -> None:
         super().__init__()
-        
+
         assert split in ["train", "val", "test"], f"Invalid split: {split}"
         self.split = split
         self.data_dir = data_dir
         self.num_classes = 1854
+        self.chunk_size = chunk_size
 
-        self.X_path = os.path.join(data_dir, f"{split}_X.pt")
-        self.subject_idxs_path = os.path.join(data_dir, f"{split}_subject_idxs.pt")
-        self.y_path = os.path.join(data_dir, f"{split}_y.pt") if split in ["train", "val"] else None
-
-        # データ全体をmmapモードで開く
-        self.X_mmap = torch.load(self.X_path, mmap_mode='r')
-        self.subject_idxs_mmap = torch.load(self.subject_idxs_path, mmap_mode='r')
-        if self.y_path is not None:
-            self.y_mmap = torch.load(self.y_path, mmap_mode='r')
-
-        # データの形状だけ読み込む
-        self.data_shape = self.X_mmap.shape
-        self.len = self.data_shape[0]
+        self.X_paths = [
+            os.path.join(data_dir, f"{split}_X.pt.chunk_{i}")
+            for i in range((len(self) + chunk_size - 1) // chunk_size)
+        ]
+        self.subject_idxs_paths = [
+            os.path.join(data_dir, f"{split}_subject_idxs.pt.chunk_{i}")
+            for i in range((len(self) + chunk_size - 1) // chunk_size)
+        ]
+        if split in ["train", "val"]:
+            self.y_paths = [
+                os.path.join(data_dir, f"{split}_y.pt.chunk_{i}")
+                for i in range((len(self) + chunk_size - 1) // chunk_size)
+            ]
+        else:
+            self.y_paths = None
 
     def __len__(self) -> int:
-        return self.len
+        return len(torch.load(self.X_paths[0])) * len(self.X_paths)
 
     def __getitem__(self, i):
-        # 必要に応じてmmapオブジェクトからデータを読み込む
-        X = self.X_mmap[i].clone()  # 必要に応じてclone()
-        subject_idxs = self.subject_idxs_mmap[i].clone()  # 必要に応じてclone()
+        chunk_idx = i // self.chunk_size
+        offset = i % self.chunk_size
 
-        if self.y_mmap is not None:
-            y = self.y_mmap[i].clone()  # 必要に応じてclone()
+        X = torch.load(self.X_paths[chunk_idx])[offset]
+        subject_idxs = torch.load(self.subject_idxs_paths[chunk_idx])[offset]
+
+        if self.y_paths is not None:
+            y = torch.load(self.y_paths[chunk_idx])[offset]
             return X, y, subject_idxs
         else:
             return X, subject_idxs
 
     @property
     def num_channels(self) -> int:
-        return self.data_shape[1]
-    
+        return torch.load(self.X_paths[0]).shape[1]
+
     @property
     def seq_len(self) -> int:
-        return self.data_shape[2]
+        return torch.load(self.X_paths[0]).shape[2]
 
-# Define a custom sampler to load data for all subjects in a batch
+# カスタムサンプラー
 class SubjectBatchSampler(torch.utils.data.Sampler):
     def __init__(self, dataset, batch_size):
         self.dataset = dataset
@@ -76,6 +82,20 @@ class SubjectBatchSampler(torch.utils.data.Sampler):
     def __len__(self):
         return len(self.unique_subjects) // self.batch_size
 
+# チャンクサンプラー
+class ChunkSampler(torch.utils.data.Sampler):
+    def __init__(self, num_chunks, chunk_size):
+        self.num_chunks = num_chunks
+        self.chunk_size = chunk_size
+
+    def __iter__(self):
+        for i in range(self.num_chunks):
+            yield range(i * self.chunk_size, (i + 1) * self.chunk_size)
+
+    def __len__(self):
+        return self.num_chunks
+
+# メイン関数
 @hydra.main(version_base=None, config_path="configs", config_name="config")
 def run(args: DictConfig):
     set_seed(args.seed)
@@ -87,26 +107,28 @@ def run(args: DictConfig):
     # ------------------
     #    Dataloader
     # ------------------
-    train_set = ThingsMEGDataset("train", args.data_dir)
+    chunk_size = 1000 # 適切な値を設定
+
+    train_set = ThingsMEGDataset("train", args.data_dir, chunk_size=chunk_size)
     train_loader = torch.utils.data.DataLoader(
         train_set,
-        batch_sampler=SubjectBatchSampler(train_set, args.batch_size // 16),  # バッチサイズを調整
+        batch_sampler=ChunkSampler(len(train_set) // chunk_size, args.batch_size // 16),
         num_workers=4,  # 適切な値を設定
         pin_memory=True
     )
 
-    val_set = ThingsMEGDataset("val", args.data_dir)
+    val_set = ThingsMEGDataset("val", args.data_dir, chunk_size=chunk_size)
     val_loader = torch.utils.data.DataLoader(
         val_set,
-        batch_sampler=SubjectBatchSampler(val_set, args.batch_size // 16),  # バッチサイズを調整
+        batch_sampler=ChunkSampler(len(val_set) // chunk_size, args.batch_size // 16),
         num_workers=2,  # 適切な値を設定
         pin_memory=True
     )
 
-    test_set = ThingsMEGDataset("test", args.data_dir)
+    test_set = ThingsMEGDataset("test", args.data_dir, chunk_size=chunk_size)
     test_loader = torch.utils.data.DataLoader(
         test_set,
-        batch_sampler=SubjectBatchSampler(test_set, args.batch_size // 16),  # バッチサイズを調整
+        batch_sampler=ChunkSampler(len(test_set) // chunk_size, args.batch_size // 16),
         num_workers=2,  # 適切な値を設定
         pin_memory=True
     )
