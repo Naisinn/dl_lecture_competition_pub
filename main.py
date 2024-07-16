@@ -8,6 +8,7 @@ from omegaconf import DictConfig
 import wandb
 from termcolor import cprint
 from tqdm import tqdm
+import gc
 
 from src.datasets import ThingsMEGDataset
 from src.models import BasicConvClassifier
@@ -45,7 +46,7 @@ def run(args: DictConfig):
     train_set = ThingsMEGDataset("train", args.data_dir)
     train_loader = torch.utils.data.DataLoader(
         train_set,
-        batch_sampler=SubjectBatchSampler(train_set, args.batch_size // 16),  # バッチサイズを調整
+        batch_sampler=SubjectBatchSampler(train_set, args.batch_size // 16),
         num_workers=0,  # num_workers を 0 に設定
         pin_memory=True
     )
@@ -53,7 +54,7 @@ def run(args: DictConfig):
     val_set = ThingsMEGDataset("val", args.data_dir)
     val_loader = torch.utils.data.DataLoader(
         val_set,
-        batch_size=args.batch_size // 16,  # バッチサイズを調整
+        batch_size=args.batch_size // 16,
         shuffle=False,
         num_workers=0,  # num_workers を 0 に設定
         pin_memory=True
@@ -62,7 +63,7 @@ def run(args: DictConfig):
     test_set = ThingsMEGDataset("test", args.data_dir)
     test_loader = torch.utils.data.DataLoader(
         test_set,
-        batch_size=args.batch_size // 16,  # バッチサイズを調整
+        batch_size=args.batch_size // 16,
         shuffle=False,
         num_workers=0,  # num_workers を 0 に設定
         pin_memory=True
@@ -101,14 +102,16 @@ def run(args: DictConfig):
 
         model.train()
         for i, (X, y, subject_idxs) in enumerate(tqdm(train_loader, desc="Train")):
-            X, y = X.to(args.device), y.to(args.device)
+            # データをGPUに転送する前にfloat16に変換
+            X = X.to(args.device).half()
+            y = y.to(args.device)
 
             y_pred = model(X)
             loss = F.cross_entropy(y_pred, y)
             loss = loss / accumulation_steps  # 勾配蓄積のために損失をスケール
 
             train_loss.append(loss.item())
-            
+
             loss.backward()
 
             if (i + 1) % accumulation_steps == 0:
@@ -118,15 +121,30 @@ def run(args: DictConfig):
             acc = accuracy(y_pred, y)
             train_acc.append(acc.item())
 
+            # メモリ使用量を監視
+            if i % 10 == 0:  # 10バッチごとに表示
+                print(f"メモリ使用量: {torch.cuda.memory_summary()}")
+
+            # 不要になったテンソルを削除
+            del X, y, y_pred, loss
+            gc.collect()
+            torch.cuda.empty_cache()
+
         model.eval()
         with torch.no_grad():
             for X, y, subject_idxs in tqdm(val_loader, desc="Validation"):
-                X, y = X.to(args.device), y.to(args.device)
+                X = X.to(args.device).half()  # データをGPUに転送する前にfloat16に変換
+                y = y.to(args.device)
 
                 y_pred = model(X)
 
                 val_loss.append(F.cross_entropy(y_pred, y).item())
                 val_acc.append(accuracy(y_pred, y).item())
+
+                # 不要になったテンソルを削除
+                del X, y, y_pred
+                gc.collect()
+                torch.cuda.empty_cache()
 
         # Update learning rate scheduler based on validation loss
         scheduler.step(np.mean(val_loss))
@@ -150,7 +168,13 @@ def run(args: DictConfig):
     model.eval()
     with torch.no_grad():  # Disable gradient calculation for evaluation
         for X, subject_idxs in tqdm(test_loader, desc="Validation"):
-            preds.append(model(X.to(args.device)).detach().cpu())
+            X = X.to(args.device).half()  # データをGPUに転送する前にfloat16に変換
+            preds.append(model(X).detach().cpu())
+
+            # 不要になったテンソルを削除
+            del X
+            gc.collect()
+            torch.cuda.empty_cache()
 
     preds = torch.cat(preds, dim=0).numpy()
     np.save(os.path.join(logdir, "submission"), preds)
