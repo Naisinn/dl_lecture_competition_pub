@@ -10,16 +10,55 @@ from termcolor import cprint
 from tqdm import tqdm
 import gc
 
-from src.datasets import ThingsMEGDataset
 from src.models import BasicConvClassifier
 from src.utils import set_seed
+
+class ThingsMEGDataset(torch.utils.data.Dataset):
+    def __init__(self, split: str, data_dir: str = "data") -> None:
+        super().__init__()
+        
+        assert split in ["train", "val", "test"], f"Invalid split: {split}"
+        self.split = split
+        self.data_dir = data_dir
+        self.num_classes = 1854
+
+        self.X_path = os.path.join(data_dir, f"{split}_X.pt")
+        self.subject_idxs_path = os.path.join(data_dir, f"{split}_subject_idxs.pt")
+        self.y_path = os.path.join(data_dir, f"{split}_y.pt") if split in ["train", "val"] else None
+
+        # データの形状だけ読み込む
+        self.data_shape = torch.load(self.X_path).shape
+        self.len = self.data_shape[0]
+
+    def __len__(self) -> int:
+        return self.len
+
+    def __getitem__(self, i):
+        # 必要に応じてデータを読み込む
+        X = torch.load(self.X_path)[i]
+        subject_idxs = torch.load(self.subject_idxs_path)[i]
+
+        if self.y_path is not None:
+            y = torch.load(self.y_path)[i]
+            return X, y, subject_idxs
+        else:
+            return X, subject_idxs
+
+    @property
+    def num_channels(self) -> int:
+        return self.data_shape[1]
+    
+    @property
+    def seq_len(self) -> int:
+        return self.data_shape[2]
 
 # Define a custom sampler to load data for all subjects in a batch
 class SubjectBatchSampler(torch.utils.data.Sampler):
     def __init__(self, dataset, batch_size):
         self.dataset = dataset
         self.batch_size = batch_size
-        self.subject_idxs = np.array(dataset.subject_idxs)
+        # subject_idxs はここではダミーとして扱う
+        self.subject_idxs = np.array([0] * len(dataset))  
         self.unique_subjects = np.unique(self.subject_idxs)
 
     def __iter__(self):
@@ -42,30 +81,27 @@ def run(args: DictConfig):
     # ------------------
     #    Dataloader
     # ------------------
-    # Use pin_memory=True for faster data transfer to GPU
     train_set = ThingsMEGDataset("train", args.data_dir)
     train_loader = torch.utils.data.DataLoader(
         train_set,
-        batch_sampler=SubjectBatchSampler(train_set, args.batch_size // 16),
-        num_workers=0,  # num_workers を 0 に設定
+        batch_sampler=SubjectBatchSampler(train_set, args.batch_size // 16),  # バッチサイズを調整
+        num_workers=4,  # 適切な値を設定
         pin_memory=True
     )
 
     val_set = ThingsMEGDataset("val", args.data_dir)
     val_loader = torch.utils.data.DataLoader(
         val_set,
-        batch_size=args.batch_size // 16,
-        shuffle=False,
-        num_workers=0,  # num_workers を 0 に設定
+        batch_sampler=SubjectBatchSampler(val_set, args.batch_size // 16),  # バッチサイズを調整
+        num_workers=2,  # 適切な値を設定
         pin_memory=True
     )
 
     test_set = ThingsMEGDataset("test", args.data_dir)
     test_loader = torch.utils.data.DataLoader(
         test_set,
-        batch_size=args.batch_size // 16,
-        shuffle=False,
-        num_workers=0,  # num_workers を 0 に設定
+        batch_sampler=SubjectBatchSampler(test_set, args.batch_size // 16),  # バッチサイズを調整
+        num_workers=2,  # 適切な値を設定
         pin_memory=True
     )
 
@@ -93,7 +129,7 @@ def run(args: DictConfig):
     ).to(args.device)
 
     # 勾配蓄積のステップ数
-    accumulation_steps = 4
+    accumulation_steps = 16  # 必要に応じて調整
 
     for epoch in range(args.epochs):
         print(f"Epoch {epoch+1}/{args.epochs}")
@@ -122,7 +158,7 @@ def run(args: DictConfig):
             train_acc.append(acc.item())
 
             # メモリ使用量を監視
-            if i % 10 == 0:  # 10バッチごとに表示
+            if i % 10 == 0:
                 print(f"メモリ使用量: {torch.cuda.memory_summary()}")
 
             # 不要になったテンソルを削除
@@ -133,7 +169,7 @@ def run(args: DictConfig):
         model.eval()
         with torch.no_grad():
             for X, y, subject_idxs in tqdm(val_loader, desc="Validation"):
-                X = X.to(args.device).half()  # データをGPUに転送する前にfloat16に変換
+                X = X.to(args.device).half()
                 y = y.to(args.device)
 
                 y_pred = model(X)
@@ -168,7 +204,7 @@ def run(args: DictConfig):
     model.eval()
     with torch.no_grad():  # Disable gradient calculation for evaluation
         for X, subject_idxs in tqdm(test_loader, desc="Validation"):
-            X = X.to(args.device).half()  # データをGPUに転送する前にfloat16に変換
+            X = X.to(args.device).half()
             preds.append(model(X).detach().cpu())
 
             # 不要になったテンソルを削除
@@ -179,7 +215,6 @@ def run(args: DictConfig):
     preds = torch.cat(preds, dim=0).numpy()
     np.save(os.path.join(logdir, "submission"), preds)
     cprint(f"Submission {preds.shape} saved at {logdir}", "cyan")
-
 
 if __name__ == "__main__":
     run()
