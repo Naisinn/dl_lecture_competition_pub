@@ -38,33 +38,33 @@ def run(args: DictConfig):
     if args.use_wandb:
         wandb.init(mode="online", dir=logdir, project="MEG-classification")
 
-# ------------------
+    # ------------------
     #    Dataloader
     # ------------------
     # Use pin_memory=True for faster data transfer to GPU
-    train_set = ThingsMEGDataset("train", args.data_dir)  # train_setを定義
+    train_set = ThingsMEGDataset("train", args.data_dir)
     train_loader = torch.utils.data.DataLoader(
-        train_set, 
-        batch_sampler=SubjectBatchSampler(train_set, args.batch_size// 16), 
-        num_workers=4,  # train_loaderのnum_workersを4に設定
+        train_set,
+        batch_sampler=SubjectBatchSampler(train_set, args.batch_size // 16),  # バッチサイズを調整
+        num_workers=0,  # num_workers を 0 に設定
         pin_memory=True
     )
 
-    val_set = ThingsMEGDataset("val", args.data_dir)  # val_setを定義
+    val_set = ThingsMEGDataset("val", args.data_dir)
     val_loader = torch.utils.data.DataLoader(
-        val_set, 
-        batch_size=args.batch_size// 16, 
-        shuffle=False, 
-        num_workers=2,  # val_loaderのnum_workersを2に設定
+        val_set,
+        batch_size=args.batch_size // 16,  # バッチサイズを調整
+        shuffle=False,
+        num_workers=0,  # num_workers を 0 に設定
         pin_memory=True
     )
 
-    test_set = ThingsMEGDataset("test", args.data_dir)  # test_setを定義
+    test_set = ThingsMEGDataset("test", args.data_dir)
     test_loader = torch.utils.data.DataLoader(
-        test_set, 
-        batch_size=args.batch_size// 16, 
-        shuffle=False, 
-        num_workers=2,  # test_loaderのnum_workersを2に設定
+        test_set,
+        batch_size=args.batch_size // 16,  # バッチサイズを調整
+        shuffle=False,
+        num_workers=0,  # num_workers を 0 に設定
         pin_memory=True
     )
 
@@ -91,28 +91,32 @@ def run(args: DictConfig):
         task="multiclass", num_classes=train_set.num_classes, top_k=10
     ).to(args.device)
 
+    # 勾配蓄積のステップ数
+    accumulation_steps = 4
+
     for epoch in range(args.epochs):
         print(f"Epoch {epoch+1}/{args.epochs}")
 
         train_loss, train_acc, val_loss, val_acc = [], [], [], []
 
         model.train()
-        # Disable gradient calculation for validation loop to save memory and time
-        with torch.no_grad():
-            for X, y, subject_idxs in tqdm(train_loader, desc="Train"):
-                X, y = X.to(args.device), y.to(args.device)
+        for i, (X, y, subject_idxs) in enumerate(tqdm(train_loader, desc="Train")):
+            X, y = X.to(args.device), y.to(args.device)
 
-                y_pred = model(X)
+            y_pred = model(X)
+            loss = F.cross_entropy(y_pred, y)
+            loss = loss / accumulation_steps  # 勾配蓄積のために損失をスケール
 
-                loss = F.cross_entropy(y_pred, y)
-                train_loss.append(loss.item())
+            train_loss.append(loss.item())
+            
+            loss.backward()
 
-                optimizer.zero_grad()
-                loss.backward()
+            if (i + 1) % accumulation_steps == 0:
                 optimizer.step()
+                optimizer.zero_grad()
 
-                acc = accuracy(y_pred, y)
-                train_acc.append(acc.item())
+            acc = accuracy(y_pred, y)
+            train_acc.append(acc.item())
 
         model.eval()
         with torch.no_grad():
