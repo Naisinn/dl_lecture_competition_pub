@@ -38,20 +38,34 @@ def run(args: DictConfig):
     if args.use_wandb:
         wandb.init(mode="online", dir=logdir, project="MEG-classification")
 
-    # ------------------
+# ------------------
     #    Dataloader
     # ------------------
     # Use pin_memory=True for faster data transfer to GPU
-    loader_args = {"num_workers": args.num_workers, "pin_memory": True}
+    train_set = ThingsMEGDataset("train", args.data_dir)  # train_setを定義
+    train_loader = torch.utils.data.DataLoader(
+        train_set, 
+        batch_sampler=SubjectBatchSampler(train_set, args.batch_size// 16), 
+        num_workers=4,  # train_loaderのnum_workersを4に設定
+        pin_memory=True
+    )
 
-    train_set = ThingsMEGDataset("train", args.data_dir)
-    # Use the custom sampler for train_loader
-    train_loader = torch.utils.data.DataLoader(train_set, batch_sampler=SubjectBatchSampler(train_set, args.batch_size), **loader_args)
-    val_set = ThingsMEGDataset("val", args.data_dir)
-    val_loader = torch.utils.data.DataLoader(val_set, batch_size=args.batch_size, shuffle=False, **loader_args)
-    test_set = ThingsMEGDataset("test", args.data_dir)
+    val_set = ThingsMEGDataset("val", args.data_dir)  # val_setを定義
+    val_loader = torch.utils.data.DataLoader(
+        val_set, 
+        batch_size=args.batch_size// 16, 
+        shuffle=False, 
+        num_workers=2,  # val_loaderのnum_workersを2に設定
+        pin_memory=True
+    )
+
+    test_set = ThingsMEGDataset("test", args.data_dir)  # test_setを定義
     test_loader = torch.utils.data.DataLoader(
-        test_set, batch_size=args.batch_size, shuffle=False, **loader_args
+        test_set, 
+        batch_size=args.batch_size// 16, 
+        shuffle=False, 
+        num_workers=2,  # test_loaderのnum_workersを2に設定
+        pin_memory=True
     )
 
     # ------------------
