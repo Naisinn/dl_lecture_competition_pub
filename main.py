@@ -26,20 +26,26 @@ class ThingsMEGDataset(torch.utils.data.Dataset):
         self.subject_idxs_path = os.path.join(data_dir, f"{split}_subject_idxs.pt")
         self.y_path = os.path.join(data_dir, f"{split}_y.pt") if split in ["train", "val"] else None
 
+        # データ全体をmmapモードで開く
+        self.X_mmap = torch.load(self.X_path, mmap_mode='r')
+        self.subject_idxs_mmap = torch.load(self.subject_idxs_path, mmap_mode='r')
+        if self.y_path is not None:
+            self.y_mmap = torch.load(self.y_path, mmap_mode='r')
+
         # データの形状だけ読み込む
-        self.data_shape = torch.load(self.X_path).shape
+        self.data_shape = self.X_mmap.shape
         self.len = self.data_shape[0]
 
     def __len__(self) -> int:
         return self.len
 
     def __getitem__(self, i):
-        # 必要に応じてデータを読み込む
-        X = torch.load(self.X_path)[i]
-        subject_idxs = torch.load(self.subject_idxs_path)[i]
+        # 必要に応じてmmapオブジェクトからデータを読み込む
+        X = self.X_mmap[i].clone()  # 必要に応じてclone()
+        subject_idxs = self.subject_idxs_mmap[i].clone()  # 必要に応じてclone()
 
-        if self.y_path is not None:
-            y = torch.load(self.y_path)[i]
+        if self.y_mmap is not None:
+            y = self.y_mmap[i].clone()  # 必要に応じてclone()
             return X, y, subject_idxs
         else:
             return X, subject_idxs
