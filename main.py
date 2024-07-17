@@ -13,6 +13,20 @@ import gc
 from src.models import BasicConvClassifier
 from src.utils import set_seed
 
+# データセットをチャンクに分割する関数
+def split_dataset_into_chunks(data_path, chunk_size):
+    data = torch.load(data_path)
+    num_chunks = (len(data) + chunk_size - 1) // chunk_size
+
+    # チャンクファイルを保存するディレクトリを作成
+    chunk_dir = os.path.splitext(data_path)[0] + "_chunks"
+    os.makedirs(chunk_dir, exist_ok=True)
+
+    for i in range(num_chunks):
+        chunk = data[i * chunk_size:(i + 1) * chunk_size]
+        chunk_path = os.path.join(chunk_dir, f"chunk_{i}.pt")  # チャンクファイルのパス
+        torch.save(chunk, chunk_path)
+
 # データセットクラス
 class ThingsMEGDataset(torch.utils.data.Dataset):
     def __init__(self, split: str, data_dir: str = "data", chunk_size: int = 1000) -> None:
@@ -25,24 +39,26 @@ class ThingsMEGDataset(torch.utils.data.Dataset):
         self.chunk_size = chunk_size
 
         self.X_paths = [
-            os.path.join(data_dir, f"{split}_X.pt.chunk_{i}")
+            os.path.join(data_dir, f"{split}_X.pt_chunks/chunk_{i}.pt")
             for i in range((len(self) + chunk_size - 1) // chunk_size)
         ]
         self.subject_idxs_paths = [
-            os.path.join(data_dir, f"{split}_subject_idxs.pt.chunk_{i}")
+            os.path.join(data_dir, f"{split}_subject_idxs.pt_chunks/chunk_{i}.pt")
             for i in range((len(self) + chunk_size - 1) // chunk_size)
         ]
         if split in ["train", "val"]:
             self.y_paths = [
-                os.path.join(data_dir, f"{split}_y.pt.chunk_{i}")
+                os.path.join(data_dir, f"{split}_y.pt_chunks/chunk_{i}.pt")
                 for i in range((len(self) + chunk_size - 1) // chunk_size)
             ]
         else:
             self.y_paths = None
 
     def __len__(self) -> int:
-        # 全体のデータ数を返すように修正
-        return len(self.X_paths) * torch.load(self.X_paths[0]).shape[0]  
+        total_len = 0
+        for X_path in self.X_paths:
+            total_len += len(torch.load(X_path))
+        return total_len 
 
     def __getitem__(self, i):
         chunk_idx = i // self.chunk_size
@@ -106,10 +122,18 @@ def run(args: DictConfig):
         wandb.init(mode="online", dir=logdir, project="MEG-classification")
 
     # ------------------
-    #    Dataloader
+    # データセットの分割 (ThingsMEGDataset のコンストラクタが呼ばれる前に実行)
     # ------------------
     chunk_size = 1000 # 適切な値を設定
+    for split in ["train", "val", "test"]:
+        split_dataset_into_chunks(os.path.join(args.data_dir, f"{split}_X.pt"), chunk_size)
+        split_dataset_into_chunks(os.path.join(args.data_dir, f"{split}_subject_idxs.pt"), chunk_size)
+        if split in ["train", "val"]:
+            split_dataset_into_chunks(os.path.join(args.data_dir, f"{split}_y.pt"), chunk_size)
 
+    # ------------------
+    #    Dataloader
+    # ------------------
     train_set = ThingsMEGDataset("train", args.data_dir, chunk_size=chunk_size)
     train_loader = torch.utils.data.DataLoader(
         train_set,
