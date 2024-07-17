@@ -3,29 +3,13 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torchmetrics import Accuracy
-import hydra
-from omegaconf import DictConfig
-import wandb
+import yaml
 from termcolor import cprint
 from tqdm import tqdm
 import gc
 
 from src.models import BasicConvClassifier
 from src.utils import set_seed
-
-# データセットをチャンクに分割する関数
-def split_dataset_into_chunks(data_path, chunk_size):
-    data = torch.load(data_path)
-    num_chunks = (len(data) + chunk_size - 1) // chunk_size
-
-    # チャンクファイルを保存するディレクトリを作成
-    chunk_dir = os.path.splitext(data_path)[0] + "_chunks"
-    os.makedirs(chunk_dir, exist_ok=True)
-
-    for i in range(num_chunks):
-        chunk = data[i * chunk_size:(i + 1) * chunk_size]
-        chunk_path = os.path.join(chunk_dir, f"chunk_{i}.pt")  # チャンクファイルのパス
-        torch.save(chunk, chunk_path)
 
 # データセットクラス
 class ThingsMEGDataset(torch.utils.data.Dataset):
@@ -55,10 +39,11 @@ class ThingsMEGDataset(torch.utils.data.Dataset):
             self.y_paths = None
 
     def __len__(self) -> int:
+        # 全体のデータ数を返すように修正
         total_len = 0
         for X_path in self.X_paths:
             total_len += len(torch.load(X_path))
-        return total_len 
+        return total_len
 
     def __getitem__(self, i):
         chunk_idx = i // self.chunk_size
@@ -87,7 +72,7 @@ class SubjectBatchSampler(torch.utils.data.Sampler):
         self.dataset = dataset
         self.batch_size = batch_size
         # subject_idxs はここではダミーとして扱う
-        self.subject_idxs = np.array([0] * len(dataset))  
+        self.subject_idxs = np.array([0] * len(dataset))
         self.unique_subjects = np.unique(self.subject_idxs)
 
     def __iter__(self):
@@ -113,48 +98,50 @@ class ChunkSampler(torch.utils.data.Sampler):
         return self.num_chunks
 
 # メイン関数
-@hydra.main(version_base=None, config_path="configs", config_name="config")
-def run(args: DictConfig):
-    set_seed(args.seed)
-    logdir = hydra.core.hydra_config.HydraConfig.get().runtime.output_dir
+def main():
+    # 設定ファイルを読み込む
+    with open("config.yaml", "r") as f:
+        config = yaml.safe_load(f)
 
-    if args.use_wandb:
-        wandb.init(mode="online", dir=logdir, project="MEG-classification")
+    # 設定からパラメータを取得
+    batch_size = config["batch_size"]
+    epochs = config["epochs"]
+    lr = config["lr"]
+    device = torch.device(config["device"])
+    num_workers = config["num_workers"]
+    seed = config["seed"]
+    use_wandb = config["use_wandb"]
+    data_dir = config["data_dir"]
+    chunk_size = config.get("chunk_size", 1000)  # チャンクサイズ (デフォルト値: 1000)
 
-    # ------------------
-    # データセットの分割 (ThingsMEGDataset のコンストラクタが呼ばれる前に実行)
-    # ------------------
-    chunk_size = 1000 # 適切な値を設定
-    for split in ["train", "val", "test"]:
-        split_dataset_into_chunks(os.path.join(args.data_dir, f"{split}_X.pt"), chunk_size)
-        split_dataset_into_chunks(os.path.join(args.data_dir, f"{split}_subject_idxs.pt"), chunk_size)
-        if split in ["train", "val"]:
-            split_dataset_into_chunks(os.path.join(args.data_dir, f"{split}_y.pt"), chunk_size)
+    set_seed(seed)
+
+    # ... (logdir, wandb.init は必要に応じて修正) ...
 
     # ------------------
     #    Dataloader
     # ------------------
-    train_set = ThingsMEGDataset("train", args.data_dir, chunk_size=chunk_size)
+    train_set = ThingsMEGDataset("train", data_dir, chunk_size=chunk_size)
     train_loader = torch.utils.data.DataLoader(
         train_set,
-        batch_sampler=ChunkSampler(len(train_set) // chunk_size, args.batch_size // 16),
-        num_workers=4,  # 適切な値を設定
+        batch_sampler=ChunkSampler(len(train_set) // chunk_size, batch_size // 16),
+        num_workers=num_workers,
         pin_memory=True
     )
 
-    val_set = ThingsMEGDataset("val", args.data_dir, chunk_size=chunk_size)
+    val_set = ThingsMEGDataset("val", data_dir, chunk_size=chunk_size)
     val_loader = torch.utils.data.DataLoader(
         val_set,
-        batch_sampler=ChunkSampler(len(val_set) // chunk_size, args.batch_size // 16),
-        num_workers=2,  # 適切な値を設定
+        batch_sampler=ChunkSampler(len(val_set) // chunk_size, batch_size // 16),
+        num_workers=num_workers,
         pin_memory=True
     )
 
-    test_set = ThingsMEGDataset("test", args.data_dir, chunk_size=chunk_size)
+    test_set = ThingsMEGDataset("test", data_dir, chunk_size=chunk_size)
     test_loader = torch.utils.data.DataLoader(
         test_set,
-        batch_sampler=ChunkSampler(len(test_set) // chunk_size, args.batch_size // 16),
-        num_workers=2,  # 適切な値を設定
+        batch_sampler=ChunkSampler(len(test_set) // chunk_size, batch_size // 16),
+        num_workers=num_workers,
         pin_memory=True
     )
 
@@ -163,12 +150,12 @@ def run(args: DictConfig):
     # ------------------
     model = BasicConvClassifier(
         train_set.num_classes, train_set.seq_len, train_set.num_channels
-    ).to(args.device)
+    ).to(device)
 
     # ------------------
     #     Optimizer
     # ------------------
-    optimizer = torch.optim.Adam(model.parameters(), lr=args.lr)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
 
     # Consider using a learning rate scheduler
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=3)
@@ -179,21 +166,21 @@ def run(args: DictConfig):
     max_val_acc = 0
     accuracy = Accuracy(
         task="multiclass", num_classes=train_set.num_classes, top_k=10
-    ).to(args.device)
+    ).to(device)
 
     # 勾配蓄積のステップ数
     accumulation_steps = 16  # 必要に応じて調整
 
-    for epoch in range(args.epochs):
-        print(f"Epoch {epoch+1}/{args.epochs}")
+    for epoch in range(epochs):
+        print(f"Epoch {epoch+1}/{epochs}")
 
         train_loss, train_acc, val_loss, val_acc = [], [], [], []
 
         model.train()
         for i, (X, y, subject_idxs) in enumerate(tqdm(train_loader, desc="Train")):
             # データをGPUに転送する前にfloat16に変換
-            X = X.to(args.device).half()
-            y = y.to(args.device)
+            X = X.to(device).half()
+            y = y.to(device)
 
             y_pred = model(X)
             loss = F.cross_entropy(y_pred, y)
@@ -222,8 +209,8 @@ def run(args: DictConfig):
         model.eval()
         with torch.no_grad():
             for X, y, subject_idxs in tqdm(val_loader, desc="Validation"):
-                X = X.to(args.device).half()
-                y = y.to(args.device)
+                X = X.to(device).half()
+                y = y.to(device)
 
                 y_pred = model(X)
 
@@ -238,26 +225,26 @@ def run(args: DictConfig):
         # Update learning rate scheduler based on validation loss
         scheduler.step(np.mean(val_loss))
 
-        print(f"Epoch {epoch+1}/{args.epochs} | train loss: {np.mean(train_loss):.3f} | train acc: {np.mean(train_acc):.3f} | val loss: {np.mean(val_loss):.3f} | val acc: {np.mean(val_acc):.3f}")
-        torch.save(model.state_dict(), os.path.join(logdir, "model_last.pt"))
-        if args.use_wandb:
+        print(f"Epoch {epoch+1}/{epochs} | train loss: {np.mean(train_loss):.3f} | train acc: {np.mean(train_acc):.3f} | val loss: {np.mean(val_loss):.3f} | val acc: {np.mean(val_acc):.3f}")
+        # torch.save(model.state_dict(), os.path.join(logdir, "model_last.pt"))
+        if use_wandb:
             wandb.log({"train_loss": np.mean(train_loss), "train_acc": np.mean(train_acc), "val_loss": np.mean(val_loss), "val_acc": np.mean(val_acc)})
 
         if np.mean(val_acc) > max_val_acc:
             cprint("New best.", "cyan")
-            torch.save(model.state_dict(), os.path.join(logdir, "model_best.pt"))
+            # torch.save(model.state_dict(), os.path.join(logdir, "model_best.pt"))
             max_val_acc = np.mean(val_acc)
 
     # ----------------------------------
     #  Start evaluation with best model
     # ----------------------------------
-    model.load_state_dict(torch.load(os.path.join(logdir, "model_best.pt"), map_location=args.device))
+    # model.load_state_dict(torch.load(os.path.join(logdir, "model_best.pt"), map_location=device))
 
     preds = []
     model.eval()
     with torch.no_grad():  # Disable gradient calculation for evaluation
         for X, subject_idxs in tqdm(test_loader, desc="Validation"):
-            X = X.to(args.device).half()
+            X = X.to(device).half()
             preds.append(model(X).detach().cpu())
 
             # 不要になったテンソルを削除
@@ -266,8 +253,8 @@ def run(args: DictConfig):
             torch.cuda.empty_cache()
 
     preds = torch.cat(preds, dim=0).numpy()
-    np.save(os.path.join(logdir, "submission"), preds)
-    cprint(f"Submission {preds.shape} saved at {logdir}", "cyan")
+    np.save(os.path.join(".", "submission"), preds)
+    cprint(f"Submission {preds.shape} saved at {data_dir}", "cyan")
 
 if __name__ == "__main__":
-    run()
+    main()

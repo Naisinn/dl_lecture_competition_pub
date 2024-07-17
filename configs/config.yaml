@@ -11,3 +11,19 @@ data_dir: data
 
 # Evaluation
 model_path: 
+
+# Hydra settings
+hydra:
+  logging:
+    version: 1
+    formatters:
+      simple:
+        format: '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    handlers:
+      console:
+        class: logging.StreamHandler
+        formatter: simple
+        level: DEBUG
+    root:
+      level: DEBUG
+      handlers: [console]

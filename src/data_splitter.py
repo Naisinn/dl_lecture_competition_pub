@@ -1,5 +1,6 @@
 import os
 import torch
+import yaml
 
 # データセットをチャンクに分割する関数
 def split_dataset_into_chunks(data_path, chunk_size):
@@ -30,8 +31,12 @@ def split_dataset_into_chunks(data_path, chunk_size):
             print(f"Error saving chunk {i}: {e}")
 
 if __name__ == "__main__":
-    data_dir = "data"  # データディレクトリ
-    chunk_size = 1000  # チャンクサイズ
+    # 設定ファイルを読み込む
+    with open("config.yaml", "r") as f:
+        config = yaml.safe_load(f)
+
+    data_dir = config["data_dir"]  # データディレクトリ
+    chunk_size = config.get("chunk_size", 1000)  # チャンクサイズ (デフォルト値: 1000)
 
     for split in ["train", "val", "test"]:
         split_dataset_into_chunks(os.path.join(data_dir, f"{split}_X.pt"), chunk_size)
