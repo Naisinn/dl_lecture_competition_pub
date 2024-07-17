@@ -41,7 +41,8 @@ class ThingsMEGDataset(torch.utils.data.Dataset):
             self.y_paths = None
 
     def __len__(self) -> int:
-        return len(torch.load(self.X_paths[0])) * len(self.X_paths)
+        # 全体のデータ数を返すように修正
+        return len(self.X_paths) * torch.load(self.X_paths[0]).shape[0]  
 
     def __getitem__(self, i):
         chunk_idx = i // self.chunk_size
